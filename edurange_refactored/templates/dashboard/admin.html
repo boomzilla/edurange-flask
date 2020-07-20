@@ -131,6 +131,23 @@
                         {% endfor %}
                     </tbody>
                     </table>
+                    <div class="container-fluid">
+                      <div class="row">
+                        <div class="col-sm">
+                          {% for student in students %}
+                            <div><button class="btn btn-dark mb-2 mt-2 pb-2 pt-2" type="button" id="draggableID" draggable="true" >{{ student.username }}</button></div>
+                          {% endfor %}
+                        </div>
+                        <div class="col-sm">
+                          {% for group in groups %}
+                              <!-- <div><button class="btn btn-dark mb-2 mt-2" type="button" >{{ group.name }}</button></div> -->
+                              <div class="card mb-2 mt-2 pb-2 pt-2" ondrop="group_drop_handler(event)" ondragover="dragover_handler(event) id="target">
+                                <h4 class="pl-2">{{ group.name }}</h4>
+                              </div>
+                          {% endfor %}
+                        </div>
+                      </div>
+                    </div>
                 </div>
                 </form>
                 <!--user table stuff-->
@@ -232,6 +249,25 @@
           if (document.forms['addGroupUsers']['selection'].value.includes(uid) == true) {
             document.forms['addGroupUsers']['selection'].value = document.forms['addGroupUsers']['selection'].value.replace(uid + ',', '');
           } else { document.forms['addGroupUsers']['selection'].value += uid + ','; }
+        }
+        function dragstart_handler(ev) {
+          // Add the target element's id to the data transfer object
+          ev.dataTransfer.setData("text/plain", ev.target.id);
+        }
+        window.addEventListener('DOMContentLoaded', () => {
+          // Get the element by id
+          const element = document.getElementById("draggableID");
+          // Add the ondragstart event listener
+          element.addEventListener("dragstart", dragstart_handler);
+        });
+        function dragover_handler(ev){
+          ev.dataTransfer.setData("text/plain", ev.target.id);
+        }
+        function group_drop_handler(ev){
+          ev.preventDefault();
+          console.log(dropID);
+          const data = ev.dataTransfer.getData("text/plain");
+          ev.target.appendChild(document.getElementById(data));
         }
     </script>
 
