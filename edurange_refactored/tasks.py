@@ -10,8 +10,10 @@ from os import environ
 import yaml
 from celery import Celery
 from celery.utils.log import get_task_logger
-from flask import current_app, flash, render_template, session
+from flask import current_app, flash, render_template
 from flask_mail import Mail, Message
+import time
+from datetime import datetime
 
 from edurange_refactored.scenario_json import find_and_copy_template, write_resource, \
     adjust_network
@@ -19,6 +21,8 @@ from edurange_refactored.scenario_utils import (
     gather_files,
 )
 from edurange_refactored.settings import CELERY_BROKER_URL, CELERY_RESULT_BACKEND
+
+
 
 logger = get_task_logger(__name__)
 
@@ -165,7 +169,8 @@ def CreateScenarioTask(self, name, s_type, owner, group, g_id, s_id):
         #write provider and networks
         find_and_copy_template(s_type, "network")
         adjust_network(address, name)
-        logger.info("All flags: {}".format(flags))
+        os.system("terraform init")
+        os.system("terraform plan -out network")
 
         logger.info("All flags: {}".format(flags))
 
@@ -176,7 +181,7 @@ def CreateScenarioTask(self, name, s_type, owner, group, g_id, s_id):
                                c_names[i], usernames, passwords,
                                s_files[i], g_files[i], u_files[i], flags)
 
-        os.system("terraform init")
+
         os.chdir("../../..")
 
         ScenarioGroups.create(group_id=g_id, scenario_id=s_id)
@@ -185,6 +190,7 @@ def CreateScenarioTask(self, name, s_type, owner, group, g_id, s_id):
 @celery.task(bind=True)
 def start(self, sid):
     from edurange_refactored.user.models import Scenarios
+    from edurange_refactored.utils import setAttempt
 
     app = current_app
     logger.info(
@@ -204,12 +210,14 @@ def start(self, sid):
             scenario.update(status=3)
             logger.info("Folder Found")
             os.chdir("./data/tmp/" + name)
+            os.system("terraform apply network")
             os.system("terraform apply --auto-approve")
             os.chdir("../../..")
             scenario.update(status=1)
+            scenario.update(attempt=setAttempt(sid))
         else:
-            logger.info("Something went wrong")
-            flash("Something went wrong", "warning")
+            logger.info("Scenario folder could not be found")
+            flash("Scenario folder could not be found")
 
 
 @celery.task(bind=True)
@@ -244,7 +252,7 @@ def stop(self, sid):
 
 @celery.task(bind=True)
 def destroy(self, sid):
-    from edurange_refactored.user.models import Scenarios, ScenarioGroups
+    from edurange_refactored.user.models import Scenarios, ScenarioGroups, Responses
 
     app = current_app
     logger.info(
@@ -263,16 +271,20 @@ def destroy(self, sid):
             if int(scenario.status) != 0:
                 logger.info("Invalid Status")
                 raise Exception(f"Scenario in an Invalid state for Destruction")
-            elif os.path.isdir(os.path.join("./data/tmp/", name)):
+            s_responses = Responses.query.filter_by(scenario_id=s_id).all()
+            for r in s_responses:
+                r.delete()
+            if os.path.isdir(os.path.join("./data/tmp/", name)):
                 logger.info("Folder Found, current directory: {}".format(os.getcwd()))
                 os.chdir("./data/tmp/")
                 shutil.rmtree(name)
                 os.chdir("../..")
-                s_group.delete()
+                if s_group:
+                    s_group.delete()
                 scenario.delete()
             else:
-                logger.info("Something went wrong")
-                flash("Something went wrong", "warning")
+                logger.info("Scenario files not found, assuming broken scenario and deleting")
+                scenario.delete()
         else:
             raise Exception(f"Could not find scenario")
 
@@ -310,14 +322,65 @@ def scenarioTimeoutWarningEmail(self, arg):
 
 @celery.task(bind=True)
 def scenarioCollectLogs(self, arg):
-    pass
+    from edurange_refactored.utils import readCSV_by_name, formatCSV
+    from edurange_refactored.extensions import db
+    from edurange_refactored.user.models import BashHistory
+
+    def get_or_create(session, model, **kwargs):
+        instance = session.query(model).filter_by(**kwargs).first()
+        if instance:
+            return instance
+        else:
+            instance = model(**kwargs)
+            session.add(instance)
+            session.commit()
+            return instance
+
     containers = subprocess.run(['docker', 'container', 'ls'], stdout=subprocess.PIPE).stdout.decode('utf-8')
     containers = containers.split('\n')
-    for c in containers:
+    scenarios = []
+    for i, c in enumerate(containers[:-1]):
+        if i == 0:
+            continue
         c = c.split(' ')
         c_name = c[-1]
-        if c_name is not None and c_name is not 'ago' and c_name is not 'NAMES':
+        if c_name is not None and c_name != 'ago' and c_name != 'NAMES':
+            if c_name.split('_')[0] is not None and c_name.split('_')[0] not in scenarios:
+                scenarios.append(c_name.split('_')[0])
+
             os.system('docker cp ' + c_name + ':/usr/local/src/merged_logs.csv logs/' + c_name + '.csv')
+
+    files = subprocess.run(['ls', 'logs/'], stdout=subprocess.PIPE).stdout.decode('utf-8')
+    files = files.split('\n')[:-1]
+    for s in scenarios:
+        os.system('cat /dev/null > data/tmp/' + s + '/' + s + '-history.csv')
+
+    for f in files:
+            for s in scenarios:
+                if f.find(s) == 0:
+                    os.system('cat logs/' + f + ' >> data/tmp/' + s + '/' + s + '-history.csv')
+
+    session = db.session
+    for s in scenarios:
+        data = formatCSV(readCSV_by_name(s))
+
+        for line in data:
+            line[2] = datetime.fromtimestamp(int(line[2]))
+
+            get_or_create(session=session,
+                          model=BashHistory,
+                          scenario_name=s,
+                          container_name=line[1],
+                          timestamp=line[2],
+                          current_directory=line[3],
+                          input=line[4],
+                          output=line[5],
+                          prompt=line[6]
+            )
+
+
+
+
 
 
 @celery.on_after_configure.connect
